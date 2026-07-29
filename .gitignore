@@ -1,0 +1,5 @@
+.build/
+dist/
+.DS_Store
+*.perch-rename-bak
+.claude/settings.local.json
