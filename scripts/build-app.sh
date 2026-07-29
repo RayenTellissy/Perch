@@ -45,6 +45,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <key>NSAppleEventsUsageDescription</key>
     <string>Perch focuses the terminal tab where your agent session is running.</string>
 </dict>
+</plist>
 PLIST
 
 codesign --force --sign - --identifier "$BUNDLE_ID" "$APP_DIR"

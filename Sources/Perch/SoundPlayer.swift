@@ -45,6 +45,9 @@ final class SoundPlayer {
         if let last = lastPlayed[sound], Date().timeIntervalSince(last) < 1.0 { return }
         lastPlayed[sound] = Date()
 
+        let volume = defaults.object(forKey: "soundVolume") as? Double ?? 1.0
+        engine.mainMixerNode.outputVolume = Float(min(max(volume, 0), 1))
+
         if !engine.isRunning {
             do {
                 try engine.start()

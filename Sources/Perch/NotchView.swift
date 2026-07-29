@@ -11,8 +11,9 @@ enum Style {
     static let textTertiary = Color(white: 0.42)
 
     // One accent: amber for "needs you", red reserved for destructive
-    static let accent = Color(red: 0.96, green: 0.66, blue: 0.28)
+    static var accent: Color { Prefs.shared.accentColor }
     static let red = Color(red: 0.95, green: 0.38, blue: 0.40)
+    static let green = Color(red: 0.36, green: 0.84, blue: 0.47)
 
     // Dark at the top so the island blends into the menu bar; the silver
     // sheen sits along the lower edge instead
@@ -69,10 +70,49 @@ struct StaggeredAppear: ViewModifier {
             .opacity(shown ? 1 : 0)
             .offset(y: shown ? 0 : 6)
             .onAppear {
+                guard Prefs.shared.staggeredAnimations else {
+                    shown = true
+                    return
+                }
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.8).delay(Double(index) * 0.05)) {
                     shown = true
                 }
             }
+    }
+}
+
+// Small pulsing dot alternative to the cube for "working"
+struct PulsingDotView: View {
+    @State private var bright = false
+
+    var body: some View {
+        Rectangle()
+            .fill(Style.textSecondary.opacity(bright ? 1 : 0.35))
+            .frame(width: 6, height: 6)
+            .onAppear {
+                withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+                    bright = true
+                }
+            }
+    }
+}
+
+// Picks the configured "working" indicator
+struct WorkingIndicatorView: View {
+    let size: CGFloat
+
+    var body: some View {
+        switch Prefs.shared.workingIndicator {
+        case "dot":
+            PulsingDotView()
+                .frame(width: size, height: size)
+        case "none":
+            StatusSquare(color: Style.textSecondary)
+                .frame(width: size, height: size)
+        default:
+            RubiksCubeView()
+                .frame(width: size, height: size)
+        }
     }
 }
 
@@ -119,6 +159,7 @@ struct NotchShape: InsettableShape {
 
 struct NotchView: View {
     @ObservedObject var state: NotchState
+    @ObservedObject private var prefs = Prefs.shared
 
     var body: some View {
         VStack(spacing: 0) {
@@ -173,8 +214,8 @@ struct NotchView: View {
         let active = state.sessions.contains {
             $0.status == .working || $0.status == .waitingForApproval || $0.status == .waitingForAnswer
         }
-        guard active else { return NotchPanelController.collapsedSize.width }
-        return min(420, NotchPanelController.expandedSize.width)
+        guard active, prefs.collapsedShowsActivity else { return NotchPanelController.collapsedSize.width }
+        return min(prefs.collapsedActiveWidth, NotchPanelController.expandedSize.width)
     }
 
     private var collapsedContent: some View {
@@ -194,8 +235,7 @@ struct NotchView: View {
         if needsAttention {
             StatusSquare(color: Style.accent)
         } else if state.sessions.contains(where: { $0.status == .working }) {
-            RubiksCubeView()
-                .frame(width: 22, height: 22)
+            WorkingIndicatorView(size: 22)
         } else {
             StatusSquare(color: Style.textTertiary)
         }
@@ -231,6 +271,10 @@ struct NotchView: View {
                     session: spotlight,
                     totalSessions: state.sessions.count,
                     dismiss: { state.dismissSpotlight() },
+                    close: {
+                        state.dismissSpotlight()
+                        state.collapseNow()
+                    },
                     jump: { TerminalJumper.jump(to: spotlight) }
                 )
                 .padding(.top, 14)
@@ -245,6 +289,7 @@ struct NotchView: View {
                         state.showNewSession = true
                     }
                     HoverIconButton(systemName: "gearshape") {
+                        state.collapseNow()
                         state.onOpenSettings?()
                     }
                 }
@@ -272,7 +317,8 @@ struct NotchView: View {
 
             Spacer(minLength: 0)
 
-            if state.approvals.isEmpty, state.questions.isEmpty, !state.showNewSession,
+            if prefs.showUsageFooter,
+               state.approvals.isEmpty, state.questions.isEmpty, !state.showNewSession,
                state.spotlightSession == nil,
                let usage = state.usage, !usage.windows.isEmpty || usage.needsLogin {
                 UsageFooterView(usage: usage) {
@@ -801,13 +847,13 @@ struct SessionRowView: View {
     let session: AgentSession
     let action: () -> Void
 
+    @ObservedObject private var prefs = Prefs.shared
     @State private var hovered = false
 
     var body: some View {
         HStack(spacing: 10) {
             if session.status == .working {
-                RubiksCubeView()
-                    .frame(width: 26, height: 26)
+                WorkingIndicatorView(size: 26)
             } else {
                 StatusSquare(color: statusColor)
                     .frame(width: 26)
@@ -818,7 +864,7 @@ struct SessionRowView: View {
                     .font(Style.sans(11, .semibold))
                     .foregroundStyle(Style.textPrimary)
                     .lineLimit(1)
-                if !session.lastPrompt.isEmpty {
+                if prefs.showPromptLine, !session.lastPrompt.isEmpty {
                     (Text("You: ").foregroundStyle(Style.textTertiary)
                         + Text(session.lastPrompt).foregroundStyle(Style.textSecondary))
                         .font(Style.mono(10))
@@ -846,10 +892,12 @@ struct SessionRowView: View {
                         .padding(.vertical, 2)
                         .overlay(Rectangle().strokeBorder(Style.accent.opacity(0.35), lineWidth: 1))
                 }
-                TimelineView(.periodic(from: .now, by: 30)) { _ in
-                    Text(Self.relativeTime(session.lastUpdated))
-                        .font(Style.mono(9))
-                        .foregroundStyle(Style.textTertiary)
+                if prefs.showRelativeTime {
+                    TimelineView(.periodic(from: .now, by: 30)) { _ in
+                        Text(Self.relativeTime(session.lastUpdated))
+                            .font(Style.mono(9))
+                            .foregroundStyle(Style.textTertiary)
+                    }
                 }
             }
         }
@@ -857,7 +905,7 @@ struct SessionRowView: View {
         .padding(.horizontal, 10)
         .background(hovered ? Style.hoverBackground : Style.cardBackground)
         .overlay {
-            if session.status == .working {
+            if session.status == .working, prefs.spinningBorderEnabled {
                 SpinningBorderView()
             } else {
                 Rectangle()
@@ -932,6 +980,7 @@ struct ResponseSpotlightView: View {
     let session: AgentSession
     let totalSessions: Int
     let dismiss: () -> Void
+    let close: () -> Void
     let jump: () -> Void
 
     var body: some View {
@@ -954,6 +1003,7 @@ struct ResponseSpotlightView: View {
                     Text("Done")
                         .font(Style.sans(10, .medium))
                         .foregroundStyle(Style.textTertiary)
+                    HoverIconButton(systemName: "xmark", action: close)
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 7)
@@ -975,12 +1025,24 @@ struct ResponseSpotlightView: View {
             .overlay(Rectangle().strokeBorder(Style.border, lineWidth: 1))
             .frame(maxHeight: .infinity)
 
-            HoverRowButton(action: dismiss) {
-                Text("Show all \(totalSessions) session\(totalSessions == 1 ? "" : "s")")
-                    .font(Style.sans(11))
-                    .foregroundStyle(Style.textTertiary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 4)
+            HStack(spacing: 8) {
+                HoverRowButton(action: close) {
+                    Text("Okay")
+                        .font(Style.sans(11, .medium))
+                        .foregroundStyle(Style.green)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 4)
+                }
+                .overlay(Rectangle().strokeBorder(Style.green.opacity(0.6), lineWidth: 1))
+
+                HoverRowButton(action: dismiss) {
+                    Text("Show all \(totalSessions) session\(totalSessions == 1 ? "" : "s")")
+                        .font(Style.sans(11))
+                        .foregroundStyle(Style.textSecondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 4)
+                }
+                .overlay(Rectangle().strokeBorder(Style.borderStrong, lineWidth: 1))
             }
         }
     }
@@ -989,12 +1051,14 @@ struct ResponseSpotlightView: View {
 struct NewSessionView: View {
     @ObservedObject var state: NotchState
 
-    @State private var agent = "claude"
+    @State private var agent = Prefs.shared.defaultAgent
 
     private static let agents = [
         ("claude", "Claude"),
         ("codex", "Codex"),
-        ("gemini", "Gemini")
+        ("gemini", "Gemini"),
+        ("opencode", "OpenCode"),
+        ("cursor-agent", "Cursor")
     ]
 
     var body: some View {

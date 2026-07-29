@@ -40,8 +40,19 @@ final class NotchState: ObservableObject {
                 self?.isHovering = false
             }
             hoverExitTask = task
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: task)
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + Prefs.shared.hoverCollapseDelay,
+                execute: task
+            )
         }
+    }
+
+    // Collapse immediately, skipping the hover grace period — used when the
+    // settings window opens so the island doesn't float above it
+    func collapseNow() {
+        hoverExitTask?.cancel()
+        hoverExitTask = nil
+        isHovering = false
     }
 
     var onApprovalDecision: ((String, Bool) -> Void)?
@@ -109,10 +120,17 @@ final class NotchState: ObservableObject {
     private static let agentNames = [
         "claude": "Claude Code",
         "codex": "Codex",
-        "gemini": "Gemini"
+        "gemini": "Gemini",
+        "opencode": "OpenCode",
+        "cursor": "Cursor"
     ]
 
     func apply(event: [String: Any]) {
+        var event = event
+        if (event["fv_agent"] as? String) == "cursor" {
+            guard let normalized = Self.normalizeCursorEvent(event) else { return }
+            event = normalized
+        }
         guard
             let rawName = event["hook_event_name"] as? String,
             let sessionID = event["session_id"] as? String
@@ -124,6 +142,55 @@ final class NotchState: ObservableObject {
         DispatchQueue.main.async {
             self.handle(name: name, sessionID: "\(agent):\(sessionID)", event: event)
         }
+    }
+
+    // Cursor hooks use their own event names and payload shapes — rebuild
+    // each event in the shared vocabulary before the generic handling. The
+    // fv_* enrichment and transcript_path pass through untouched (Cursor
+    // transcripts are close enough to Claude's for the tailer to read).
+    private static func normalizeCursorEvent(_ event: [String: Any]) -> [String: Any]? {
+        guard
+            let name = event["hook_event_name"] as? String,
+            let conversationID = event["conversation_id"] as? String
+        else { return nil }
+
+        var out = event
+        out["session_id"] = conversationID
+        if out["cwd"] == nil,
+           let roots = event["workspace_roots"] as? [String], let root = roots.first {
+            out["cwd"] = root
+        }
+
+        switch name {
+        case "beforeSubmitPrompt":
+            out["hook_event_name"] = "UserPromptSubmit"
+        case "beforeShellExecution":
+            out["hook_event_name"] = "PreToolUse"
+            out["tool_name"] = "Bash"
+            out["tool_input"] = ["command": (event["command"] as? String) ?? ""]
+        case "afterShellExecution":
+            out["hook_event_name"] = "PostToolUse"
+            out["tool_name"] = "Bash"
+        case "beforeMCPExecution":
+            out["hook_event_name"] = "PreToolUse"
+            // tool_input arrives as a JSON string
+            if let text = event["tool_input"] as? String,
+               let parsed = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] {
+                out["tool_input"] = parsed
+            }
+        case "afterMCPExecution":
+            out["hook_event_name"] = "PostToolUse"
+        case "afterFileEdit":
+            // Fires after the write, but as live status "Editing X" reads best
+            out["hook_event_name"] = "PreToolUse"
+            out["tool_name"] = "Edit"
+            out["tool_input"] = ["file_path": (event["file_path"] as? String) ?? ""]
+        case "stop":
+            out["hook_event_name"] = "Stop"
+        default:
+            return nil
+        }
+        return out
     }
 
     private func handle(name: String, sessionID: String, event: [String: Any]) {
@@ -200,11 +267,12 @@ final class NotchState: ObservableObject {
     // full final response, then quietly folds back after a grace period
 
     private func showSpotlight(for sessionID: String) {
-        guard let session = sessions.first(where: { $0.id == sessionID }),
+        guard Prefs.shared.spotlightEnabled,
+              let session = sessions.first(where: { $0.id == sessionID }),
               session.transcriptPath != nil else { return }
         spotlightSessionID = sessionID
         updateExpansion()
-        scheduleSpotlightDismiss()
+        scheduleSpotlightDismiss(after: Prefs.shared.spotlightDuration)
         fetchFinalResponse(sessionID: sessionID)
     }
 
@@ -342,6 +410,8 @@ final class NotchState: ObservableObject {
 
     private func applyLocation(_ event: [String: Any], to session: inout AgentSession) {
         if let path = event["transcript_path"] as? String { session.transcriptPath = path }
+        // Agents without a transcript file (OpenCode) send the title inline
+        if let title = event["fv_title"] as? String, !title.isEmpty { session.title = title }
         if let tty = event["fv_tty"] as? String { session.tty = tty }
         if let pid = event["fv_term_pid"] as? Int { session.terminalAppPID = Int32(pid) }
         if let path = event["fv_term_path"] as? String { session.terminalAppPath = path }
@@ -358,7 +428,7 @@ final class NotchState: ObservableObject {
         guard recentDirectories.first != path else { return }
         var dirs = recentDirectories.filter { $0 != path }
         dirs.insert(path, at: 0)
-        recentDirectories = Array(dirs.prefix(8))
+        recentDirectories = Array(dirs.prefix(Prefs.shared.recentDirectoryLimit))
         UserDefaults.standard.set(recentDirectories, forKey: "recentDirectories")
     }
 

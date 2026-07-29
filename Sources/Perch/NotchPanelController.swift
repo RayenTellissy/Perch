@@ -32,14 +32,13 @@ final class NotchPanelController {
         return screen.frame.maxY - screen.visibleFrame.maxY
     }
     static var expandedSize: NSSize {
-        let stored = UserDefaults.standard.double(forKey: "panelWidth")
-        let width = stored >= 440 && stored <= 800 ? stored : 520
-        return NSSize(width: width, height: 300)
+        NSSize(width: Prefs.shared.panelWidth, height: Prefs.shared.panelHeight)
     }
 
     private let panel: NSPanel
     let state = NotchState()
     private var expansionObserver: AnyCancellable?
+    private var prefsObserver: AnyCancellable?
 
     init() {
         panel = KeyablePanel(
@@ -75,6 +74,15 @@ final class NotchPanelController {
                     panel.makeKeyAndOrderFront(nil)
                 } else if panel.isKeyWindow {
                     panel.resignKey()
+                }
+            }
+
+        // Panel size lives in Prefs — refit the window when it changes
+        prefsObserver = Prefs.shared.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in
+                DispatchQueue.main.async {
+                    self?.repositionOnNotchScreen()
                 }
             }
     }

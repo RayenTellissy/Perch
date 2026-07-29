@@ -1,11 +1,16 @@
 import Foundation
 
-// Reads newly appended entries from a Claude Code session transcript so the
-// notch can mirror what the CLI is showing (latest thinking or streamed text)
-// during the gaps between hook events
+// Reads newly appended entries from a session transcript so the notch can
+// mirror what the CLI is doing (latest tool call or streamed text) during
+// the gaps between hook events. Claude Code keys entries by "type", Cursor
+// by "role" — the message payloads share the same content-block shape.
 enum TranscriptTailer {
     // Reading is capped so a huge burst of appended output stays cheap
     private static let maxRead: UInt64 = 524_288
+
+    private static func entryKind(_ json: [String: Any]) -> String? {
+        (json["type"] as? String) ?? (json["role"] as? String)
+    }
 
     static func fileSize(_ path: String) -> UInt64 {
         (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? UInt64) ?? 0
@@ -32,20 +37,20 @@ enum TranscriptTailer {
         for line in text.split(separator: "\n").reversed() {
             guard
                 let json = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-                json["type"] as? String == "assistant",
+                entryKind(json) == "assistant",
                 let message = json["message"] as? [String: Any],
                 let content = message["content"] as? [[String: Any]]
             else { continue }
 
             for block in content.reversed() {
                 switch block["type"] as? String {
+                case "tool_use":
+                    if let name = block["name"] as? String {
+                        return (toolLabel(name: name, input: block["input"] as? [String: Any]), consumed)
+                    }
                 case "text":
                     if let snippet = firstLine(block["text"] as? String) {
                         return (snippet, consumed)
-                    }
-                case "thinking":
-                    if let snippet = firstLine(block["thinking"] as? String) {
-                        return ("✻ " + snippet, consumed)
                     }
                 default:
                     continue
@@ -71,7 +76,7 @@ enum TranscriptTailer {
         for line in text.split(separator: "\n") {
             guard
                 let json = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-                let type = json["type"] as? String
+                let type = entryKind(json)
             else { continue }
 
             if type == "user" {
@@ -139,6 +144,29 @@ enum TranscriptTailer {
             title = summary
         }
         return title
+    }
+
+    // "Read NotchView.swift", "Bash swift build" — tool name plus the most
+    // salient argument, so the notch shows what the agent is doing right now
+    private static func toolLabel(name: String, input: [String: Any]?) -> String {
+        var display = name
+        if name.hasPrefix("mcp__") {
+            let parts = name.components(separatedBy: "__")
+            display = parts.last ?? name
+        }
+        guard let input else { return display }
+
+        for key in ["file_path", "path", "notebook_path"] {
+            if let path = input[key] as? String, !path.isEmpty {
+                return display + " " + (path as NSString).lastPathComponent
+            }
+        }
+        for key in ["command", "pattern", "glob_pattern", "query", "search_term", "url", "description", "skill", "prompt"] {
+            if let value = firstLine(input[key] as? String) {
+                return display + " " + value
+            }
+        }
+        return display
     }
 
     private static func firstLine(_ text: String?) -> String? {
